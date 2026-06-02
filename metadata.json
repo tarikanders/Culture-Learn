@@ -1,0 +1,6 @@
+{
+  "name": "AudioBrain",
+  "description": "Le cerveau audio intelligent : transformer les contenus en podcasts, apprendre et rester informé via l'audio.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
