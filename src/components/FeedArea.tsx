@@ -77,8 +77,16 @@ export function FeedArea({ mode }: { mode: Mode }) {
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-      setFeed(data);
-      setCachedFeed(activeTab, data);
+      if (isRefresh) {
+        setFeed((prev) => {
+          const existingIds = new Set(prev.map((f) => f.id));
+          const newItems = data.filter((f: FeedItem) => !existingIds.has(f.id));
+          return [...prev, ...newItems];
+        });
+      } else {
+        setFeed(data);
+        setCachedFeed(activeTab, data);
+      }
     } catch (err: any) {
       setError(err.message);
     } finally {
