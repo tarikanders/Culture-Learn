@@ -5,17 +5,14 @@ on:
     branches: [main]
 
 env:
-  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  PROJECT_ID: culture-learn-app
   REGION: europe-west1
   SERVICE: culture-learn
-  IMAGE: europe-west1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/culture-learn/app
+  IMAGE: europe-west1-docker.pkg.dev/culture-learn-app/cloud-run-source-deploy/culture-learn
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
 
     steps:
       - uses: actions/checkout@v4
@@ -53,7 +50,7 @@ jobs:
             --set-secrets "ANTHROPIC_API_KEY=anthropic-api-key:latest" \
             --quiet
 
-      - name: Print service URL
+      - name: Print URL
         run: |
           gcloud run services describe $SERVICE \
             --region $REGION \
