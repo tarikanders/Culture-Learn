@@ -15,4 +15,5 @@ export interface FeedItem {
 
 export interface UserProfile {
   interactions: Record<string, number>;
+  lastDecay?: number; // timestamp of last temporal decay pass
 }

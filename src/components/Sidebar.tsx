@@ -4,10 +4,10 @@ import { Mode } from '../types';
 
 interface SidebarProps {
   mode: Mode;
-  setMode: (m: Mode) => void;
+  onNavigate: (m: Mode) => void;
 }
 
-export function Sidebar({ mode, setMode }: SidebarProps) {
+export function Sidebar({ mode, onNavigate }: SidebarProps) {
   const navItems = [
     { id: 'foryou', label: 'Pour Toi', icon: Sparkles, desc: 'Votre fil personnalisé' },
     { id: 'news', label: 'Actualités', icon: Globe, desc: 'Monde & Culture' },
@@ -33,7 +33,7 @@ export function Sidebar({ mode, setMode }: SidebarProps) {
               return (
                 <button
                   key={item.id}
-                  onClick={() => setMode(item.id)}
+                  onClick={() => onNavigate(item.id)}
                   className={cn(
                     "w-full text-left p-4 rounded-xl transition-all cursor-pointer border flex flex-col gap-1",
                     isActive

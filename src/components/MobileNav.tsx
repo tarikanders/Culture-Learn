@@ -4,10 +4,10 @@ import { Mode } from '../types';
 
 interface MobileNavProps {
   mode: Mode;
-  setMode: (m: Mode) => void;
+  onNavigate: (m: Mode) => void;
 }
 
-export function MobileNav({ mode, setMode }: MobileNavProps) {
+export function MobileNav({ mode, onNavigate }: MobileNavProps) {
   const navItems = [
     { id: 'foryou', label: 'Pour Toi', icon: Sparkles },
     { id: 'news', label: 'Actus', icon: Globe },
@@ -22,7 +22,7 @@ export function MobileNav({ mode, setMode }: MobileNavProps) {
         return (
           <button
             key={item.id}
-            onClick={() => setMode(item.id)}
+            onClick={() => onNavigate(item.id)}
             className="flex flex-col items-center gap-1.5 p-2 rounded-xl transition-all"
           >
             <div className={cn("p-1.5 rounded-full transition-all", isActive ? "bg-[#C1A87D]/10" : "")}>

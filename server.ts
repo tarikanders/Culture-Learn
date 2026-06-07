@@ -55,11 +55,29 @@ async function fetchRealNews(): Promise<any[] | null> {
     })
   );
 
-  const frResult = results.find((r) => r.status === "fulfilled" && r.value.lang === "fr");
-  if (frResult && frResult.status === "fulfilled") return frResult.value.items;
+  // Merge ALL successful FR sources, deduplicate by title, cap at 15 candidates.
+  // The client ranks this pool with the user profile — no more slice(0,5) waste.
+  const frResults = results.filter((r) => r.status === "fulfilled" && r.value.lang === "fr");
+  if (frResults.length > 0) {
+    const seenTitles = new Set<string>();
+    const merged: any[] = [];
+    for (const r of frResults) {
+      if (r.status === "fulfilled") {
+        for (const item of r.value.items) {
+          const key = (item.title ?? "").toLowerCase().trim();
+          if (key && !seenTitles.has(key)) {
+            seenTitles.add(key);
+            merged.push(item);
+          }
+        }
+      }
+    }
+    if (merged.length > 0) return merged.slice(0, 15);
+  }
 
+  // Fallback: any language, up to 15
   const anyResult = results.find((r) => r.status === "fulfilled");
-  if (anyResult && anyResult.status === "fulfilled") return anyResult.value.items;
+  if (anyResult && anyResult.status === "fulfilled") return anyResult.value.items.slice(0, 15);
 
   return null;
 }
@@ -195,7 +213,8 @@ app.post("/api/feed", async (req, res) => {
       if (allItems.length > 0) {
         const ignoredSet = new Set(ignoredTitles.map((t: string) => t.toLowerCase()));
         const available = allItems.filter((i: any) => !ignoredSet.has(i.title?.toLowerCase()));
-        const toReturn = available.length >= 5 ? available.slice(0, 5) : allItems.slice(0, 5);
+        // Return up to 15 candidates — client will rank and reveal progressively
+        const toReturn = available.length > 0 ? available.slice(0, 15) : allItems.slice(0, 15);
         return res.json(toReturn);
       }
     }
@@ -216,19 +235,20 @@ app.post("/api/feed", async (req, res) => {
 
     const today = new Date().toLocaleDateString("fr-FR", { day: "numeric", month: "long", year: "numeric" });
 
-    const system = "Curateur de contenu. Génère 5 cartes captivantes. Titre avec 1 emoji pertinent.";
+    // Generate 8 candidates (vs. 5 before) so the client can rank and explore
+    const system = "Curateur de contenu. Génère 8 cartes captivantes et variées. Titre avec 1 emoji pertinent.";
 
     let prompt = "";
     if (feedType === "news_world") {
-      prompt = `${today}. 5 actualités mondiales importantes (géopolitique, tech, économie, science).${ignoreHint}${prefHint}`;
+      prompt = `${today}. 8 actualités mondiales importantes et variées (géopolitique, tech, économie, science, société).${ignoreHint}${prefHint}`;
     } else if (feedType === "news_culture") {
-      prompt = `5 sujets culture et savoirs : philosophie, psychologie, sciences, histoire des idées.${ignoreHint}${prefHint}`;
+      prompt = `8 sujets culture et savoirs variés : philosophie, psychologie, sciences, histoire des idées, linguistique.${ignoreHint}${prefHint}`;
     } else if (feedType === "stories_history") {
-      prompt = `5 récits de culture générale : biographies, découvertes, civilisations, révolutions culturelles.${ignoreHint}${prefHint}`;
+      prompt = `8 récits de culture générale variés : biographies, découvertes, civilisations, révolutions culturelles, grandes figures.${ignoreHint}${prefHint}`;
     } else if (feedType === "stories_islam") {
-      prompt = `5 récits islamiques : prophètes, compagnons, savants, civilisation islamique, sagesses spirituelles.${ignoreHint}${prefHint}`;
+      prompt = `8 récits islamiques variés : prophètes, compagnons, savants, civilisation islamique, sagesses spirituelles, histoire.${ignoreHint}${prefHint}`;
     } else {
-      prompt = `5 cartes variées (actualité, culture, histoire, islam) adaptées aux préférences.${prefHint}${ignoreHint}`;
+      prompt = `8 cartes variées (actualité, culture, histoire, islam, science) adaptées aux préférences.${prefHint}${ignoreHint}`;
     }
 
     const result = await callClaudeStructured<{ items: any[] }>(
@@ -237,7 +257,7 @@ app.post("/api/feed", async (req, res) => {
       "generate_feed_cards",
       "Générer les cartes du fil",
       FEED_SCHEMA,
-      800
+      1100  // slightly more tokens for 8 cards
     );
 
     const data = result.items || [];

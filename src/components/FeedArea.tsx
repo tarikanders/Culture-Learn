@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
 import { FeedItem, Mode } from '../types';
-import { getProfile, updateProfile, getTopPreferences } from '../lib/profile';
+import { getProfile, updateProfile, recordEngagement, getTopPreferences } from '../lib/profile';
+import { rankItems } from '../lib/ranking';
 import { getCachedFeed, setCachedFeed, isFeedFresh, getCachedArticle, setCachedArticle } from '../lib/cache';
 import { motion, AnimatePresence } from 'motion/react';
-import { Sparkles, Globe, LibraryBig, ArrowLeft, BookOpen, ThumbsUp, ThumbsDown, RefreshCw, Heart, Moon, ScrollText } from 'lucide-react';
+import { Sparkles, Globe, LibraryBig, ArrowLeft, BookOpen, ThumbsUp, ThumbsDown, Heart, Moon, ScrollText, Loader2 } from 'lucide-react';
 import Markdown from 'react-markdown';
 import { cn } from '../lib/utils';
 
@@ -33,38 +34,72 @@ function getCategoryEmoji(category: string): string {
   return '✨';
 }
 
-export function FeedArea({ mode }: { mode: Mode }) {
+export function FeedArea({ mode, navTick }: { mode: Mode; navTick: number }) {
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<string>('');
   const [readingItem, setReadingItem] = useState<FeedItem | null>(null);
   const [isGeneratingArticle, setIsGeneratingArticle] = useState(false);
   const [showLikeAnimation, setShowLikeAnimation] = useState(false);
   const [likedItems, setLikedItems] = useState<Set<string>>(new Set());
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const [readProgress, setReadProgress] = useState(0);   // 0..1
+  const [learnedCount, setLearnedCount] = useState(0);   // nb of learned preferences
 
+  // Refs
+  const scrollRef = useRef<HTMLDivElement>(null);         // reading view scroller
+  const feedScrollRef = useRef<HTMLDivElement>(null);     // feed grid scroller
+  const sentinelRef = useRef<HTMLDivElement>(null);       // infinite scroll sentinel
+  const loadingMoreRef = useRef(false);                   // guard against concurrent fetches
+  const openedAtRef = useRef<number>(0);                  // article open timestamp for dwell
+
+  // Always-fresh ref to fetchFeed (avoids stale closure in IntersectionObserver)
+  const fetchFeedRef = useRef<((isRefresh?: boolean) => Promise<void>) | undefined>(undefined);
+
+  // ── Tab initialisation on mode change ──────────────────────────────────────
   useEffect(() => {
     setReadingItem(null);
+    setReadProgress(0);
+    feedScrollRef.current?.scrollTo({ top: 0 });
     if (mode === 'news') setActiveTab('news_world');
     else if (mode === 'stories') setActiveTab('stories_history');
     else setActiveTab('foryou');
   }, [mode]);
 
+  // ── navTick: escape reading view on any nav click (even same tab) ──────────
+  useEffect(() => {
+    if (navTick === 0) return;
+    setReadingItem(null);
+    setReadProgress(0);
+    feedScrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [navTick]);
+
+  // ── Refresh learnedCount whenever we return to feed ────────────────────────
+  useEffect(() => {
+    if (readingItem) return;
+    getProfile().then((p) => {
+      const n = Object.values(p.interactions || {}).filter((v) => v > 1).length;
+      setLearnedCount(n);
+    });
+  }, [readingItem, navTick]);
+
+  // ── Core fetch + rank ───────────────────────────────────────────────────────
   const fetchFeed = async (isRefresh = false) => {
     setError(null);
 
     if (!isRefresh) {
       const cached = getCachedFeed(activeTab);
       if (cached && cached.length > 0) {
-        setFeed(cached);
+        const profile = await getProfile();
+        setFeed(rankItems(cached, profile));
         if (isFeedFresh(activeTab)) return;
       } else {
         setLoading(true);
         setFeed([]);
       }
     } else {
-      setLoading(true);
+      // isRefresh = append new items (triggered by infinite scroll)
     }
 
     try {
@@ -77,15 +112,20 @@ export function FeedArea({ mode }: { mode: Mode }) {
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
+
+      const profile = await getProfile();
+
       if (isRefresh) {
         setFeed((prev) => {
           const existingIds = new Set(prev.map((f) => f.id));
-          const newItems = data.filter((f: FeedItem) => !existingIds.has(f.id));
-          return [...prev, ...newItems];
+          const newItems = (data as FeedItem[]).filter((f) => !existingIds.has(f.id));
+          if (newItems.length === 0) return prev; // nothing new
+          return rankItems([...prev, ...newItems], profile);
         });
       } else {
-        setFeed(data);
-        setCachedFeed(activeTab, data);
+        const ranked = rankItems(data as FeedItem[], profile);
+        setFeed(ranked);
+        setCachedFeed(activeTab, data); // cache raw data, ranking is always fresh
       }
     } catch (err: any) {
       setError(err.message);
@@ -94,11 +134,43 @@ export function FeedArea({ mode }: { mode: Mode }) {
     }
   };
 
+  // Keep ref fresh on every render
+  fetchFeedRef.current = fetchFeed;
+
+  // Fetch when activeTab changes
   useEffect(() => {
     if (!activeTab) return;
     fetchFeed();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
 
+  // ── Infinite scroll via IntersectionObserver ────────────────────────────────
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries[0].isIntersecting) return;
+        if (loadingMoreRef.current) return;
+
+        loadingMoreRef.current = true;
+        setLoadingMore(true);
+        fetchFeedRef.current?.(true).finally(() => {
+          loadingMoreRef.current = false;
+          setLoadingMore(false);
+        });
+      },
+      // rootMargin: start loading 400px before the sentinel enters the viewport
+      { rootMargin: '400px', threshold: 0 }
+    );
+
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+    // Re-create observer when tab changes (to pick up fresh sentinel)
+  }, [activeTab]);
+
+  // ── Article generation ──────────────────────────────────────────────────────
   const fetchArticleContent = async (item: FeedItem): Promise<FeedItem> => {
     if (item.isGenerated) return item;
 
@@ -132,13 +204,36 @@ export function FeedArea({ mode }: { mode: Mode }) {
     }
   };
 
+  // ── Interaction handlers ────────────────────────────────────────────────────
   const handleRead = async (item: FeedItem) => {
+    openedAtRef.current = Date.now();
+    setReadProgress(0);
     setReadingItem(item);
     updateProfile(item.category, 1);
     if (!item.isGenerated) {
       const updated = await fetchArticleContent(item);
       setReadingItem(updated);
     }
+  };
+
+  const handleReadScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const { scrollTop, scrollHeight, clientHeight } = el;
+    const ratio = scrollTop / Math.max(1, scrollHeight - clientHeight);
+    setReadProgress(Math.min(1, Math.max(0, ratio)));
+  };
+
+  const handleBack = () => {
+    if (readingItem) {
+      const dwellMs = Date.now() - openedAtRef.current;
+      recordEngagement(readingItem.category, readingItem.tags, {
+        dwellMs,
+        completion: readProgress,
+      });
+    }
+    setReadingItem(null);
+    setReadProgress(0);
   };
 
   const handleFeedback = (type: 'like' | 'skip') => {
@@ -151,6 +246,7 @@ export function FeedArea({ mode }: { mode: Mode }) {
       }
     }
     setReadingItem(null);
+    setReadProgress(0);
   };
 
   const handleDoubleClick = () => {
@@ -161,17 +257,6 @@ export function FeedArea({ mode }: { mode: Mode }) {
     }
     setShowLikeAnimation(true);
     setTimeout(() => setShowLikeAnimation(false), 800);
-  };
-
-  const handleBack = () => {
-    if (readingItem) {
-      const scrollTop = scrollRef.current?.scrollTop || 0;
-      const scrollHeight = scrollRef.current?.scrollHeight || 1000;
-      const clientHeight = scrollRef.current?.clientHeight || 500;
-      const ratio = scrollTop / (scrollHeight - clientHeight);
-      updateProfile(readingItem.category, ratio > 0.8 ? 3 : -1);
-    }
-    setReadingItem(null);
   };
 
   const handleCardLike = (item: FeedItem) => {
@@ -186,10 +271,22 @@ export function FeedArea({ mode }: { mode: Mode }) {
     });
   };
 
-  // ── Reading view ─────────────────────────────────────────────────────────────
+  // ── Reading view ──────────────────────────────────────────────────────────
   if (readingItem) {
     return (
-      <div ref={scrollRef} className="flex-1 flex flex-col p-4 sm:p-8 md:p-12 overflow-y-auto no-scrollbar relative min-h-screen">
+      <div
+        ref={scrollRef}
+        onScroll={handleReadScroll}
+        className="flex-1 flex flex-col p-4 sm:p-8 md:p-12 overflow-y-auto no-scrollbar relative min-h-screen"
+      >
+        {/* Reading progress bar */}
+        <div className="fixed top-0 left-0 right-0 h-0.5 z-50 pointer-events-none">
+          <div
+            className="h-full bg-[#C1A87D] transition-all duration-100"
+            style={{ width: `${readProgress * 100}%` }}
+          />
+        </div>
+
         <div className="max-w-3xl w-full mx-auto pb-32 mt-4 md:mt-10">
           <button
             onClick={handleBack}
@@ -301,9 +398,12 @@ export function FeedArea({ mode }: { mode: Mode }) {
     );
   }
 
-  // ── Feed grid ─────────────────────────────────────────────────────────────────
+  // ── Feed grid ───────────────────────────────────────────────────────────────
   return (
-    <div className="flex-1 flex flex-col p-4 sm:p-8 md:p-12 overflow-y-auto no-scrollbar relative min-h-screen">
+    <div
+      ref={feedScrollRef}
+      className="flex-1 flex flex-col p-4 sm:p-8 md:p-12 overflow-y-auto no-scrollbar relative min-h-screen"
+    >
       <div className="max-w-4xl space-y-4 md:space-y-8 w-full mt-4 md:mt-10 mx-auto">
 
         {/* Header */}
@@ -319,6 +419,12 @@ export function FeedArea({ mode }: { mode: Mode }) {
               {mode === 'news' && 'Comprenez le monde en temps réel, explorez ses origines en profondeur.'}
               {mode === 'stories' && 'Apprenez à travers des histoires humaines et spirituelles intemporelles.'}
             </p>
+            {/* Learnt preferences indicator */}
+            {mode === 'foryou' && learnedCount > 0 && (
+              <p className="text-[10px] text-[#C1A87D]/50 uppercase tracking-widest mt-1">
+                {learnedCount} sujet{learnedCount > 1 ? 's' : ''} appris · personnalisé
+              </p>
+            )}
           </div>
 
           {(mode === 'news' || mode === 'stories') && (
@@ -365,7 +471,7 @@ export function FeedArea({ mode }: { mode: Mode }) {
             ))}
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pb-20 mt-8">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pb-8 mt-8">
             <AnimatePresence>
               {feed.map((item, idx) => (
                 <FeedCard
@@ -380,16 +486,19 @@ export function FeedArea({ mode }: { mode: Mode }) {
               ))}
             </AnimatePresence>
 
-            <div className="col-span-1 md:col-span-2 flex justify-center mt-8">
-              <button
-                onClick={() => fetchFeed(true)}
-                disabled={loading}
-                className="flex items-center gap-2 px-6 py-3 rounded-full bg-white/5 hover:bg-white/10 text-white/70 text-xs font-medium uppercase tracking-widest transition-colors"
-              >
-                <RefreshCw className={cn('w-4 h-4', loading && 'animate-spin')} />
-                Charger d'autres sujets
-              </button>
-            </div>
+            {/* Infinite scroll sentinel — invisible div that triggers next load */}
+            <div
+              ref={sentinelRef}
+              className="col-span-1 md:col-span-2 h-4"
+              aria-hidden="true"
+            />
+
+            {/* Subtle loading indicator while fetching more */}
+            {loadingMore && (
+              <div className="col-span-1 md:col-span-2 flex justify-center py-6">
+                <Loader2 className="w-5 h-5 text-white/20 animate-spin" />
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -397,7 +506,7 @@ export function FeedArea({ mode }: { mode: Mode }) {
   );
 }
 
-// ── Feed Card ─────────────────────────────────────────────────────────────────
+// ── Feed Card ──────────────────────────────────────────────────────────────────
 function FeedCard({
   item,
   idx,
@@ -420,7 +529,7 @@ function FeedCard({
     <motion.div
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: idx * 0.07 }}
+      transition={{ delay: Math.min(idx * 0.07, 0.5) }}
       className="group bg-white/[0.02] border border-white/5 rounded-2xl flex flex-col transition-all overflow-hidden relative cursor-default"
       style={{ '--accent': accent } as React.CSSProperties}
     >
@@ -472,7 +581,7 @@ function FeedCard({
   );
 }
 
-// ── Tab Button ────────────────────────────────────────────────────────────────
+// ── Tab Button ─────────────────────────────────────────────────────────────────
 function TabButton({
   active,
   onClick,
